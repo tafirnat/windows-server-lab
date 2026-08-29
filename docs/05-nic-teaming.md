@@ -46,6 +46,8 @@ Wenn man danach die Eigenschaften einer Mitgliedskarte öffnet, sieht man den ei
 
 In der Ausgabe von `ipconfig /all` sieht man dasselbe von der anderen Seite: die einzelnen Karten tauchen nicht mehr mit eigener Adresse auf, sondern nur der Team-Adapter mit einer IP und einem Standardgateway.
 
+![ipconfig-Ausgabe des Team-Adapters](../images/nic-teaming-08-ipconfig-multiplexor.png)
+
 ## Team 2: alle Karten aktiv
 
 Beim zweiten Team gibt es keinen Standby, alle vier Karten tragen Daten.
