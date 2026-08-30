@@ -1,16 +1,14 @@
 # Windows Server Lab
 
-Das ist die Dokumentation zu meinem Windows-Server-Labor. Ich lerne im Bereich Fachinformatiker für Systemintegration und habe mir dafür eine eigene Testumgebung auf Proxmox VE aufgebaut.
+Das ist die Dokumentation zu meinem Windows-Server-Labor auf Proxmox VE. Ich lerne im Bereich Fachinformatiker für Systemintegration und baue parallel dazu eine eigene Testumgebung auf, um die Themen aus dem Unterricht wirklich anzufassen.
 
-Der Grund ist einfach: Theorie kann man auswendig lernen, aber vieles versteht man erst, wenn man es einmal selbst kaputt gemacht hat. Deshalb geht es in fast jedem Kapitel hier darum, etwas einzurichten und danach absichtlich einen Fehler zu erzeugen, um zu sehen, wie das System reagiert.
-
-Ich schreibe hier auf, **warum** ich etwas so gemacht habe, nicht jeden einzelnen Klick. Die Screenshots zeigen den Rest.
+Theorie kann man auswendig lernen. Was ein RAID 5 im Ausfall tatsächlich macht, versteht man aber erst, wenn man eine Platte abzieht und zusieht. Deshalb endet hier fast jedes Kapitel damit, dass ich etwas absichtlich kaputt mache und aufschreibe, was passiert ist. Auch die Stellen, an denen ich falsch lag, stehen drin.
 
 > Hinweis: Alle IP-Adressen, Hostnamen und Benutzernamen in dieser Dokumentation stammen aus einer isolierten Testumgebung und wurden für die Veröffentlichung angepasst.
 
 ## Umgebung
 
-Alle Server laufen als virtuelle Maschinen auf Proxmox VE in einem eigenen, isolierten Netz ohne Verbindung zu meinem privaten Heimnetz. Jede Maschine hat VirtIO-Treiber und den QEMU Guest Agent, damit Snapshots sauber funktionieren.
+Alle Server sind virtuelle Maschinen auf einem Proxmox-VE-Host und laufen in einem eigenen, isolierten Netz ohne Verbindung zum privaten Heimnetz. Jede Maschine hat VirtIO-Treiber und den QEMU Guest Agent.
 
 | Hostname | Betriebssystem | Installationsart | IP |
 | :--- | :--- | :--- | :--- |
@@ -21,39 +19,42 @@ Alle Server laufen als virtuelle Maschinen auf Proxmox VE in einem eigenen, isol
 | `SRV22-GUI` | Windows Server 2022 Standard | Desktopdarstellung | `172.16.10.31` |
 | `SRV22-DC` | Windows Server 2022 Datacenter | Desktopdarstellung | `172.16.10.32` |
 
-Zwei Server ohne grafische Oberfläche sind Absicht. Server Core zwingt einen dazu, mit PowerShell zu arbeiten, und genau das wollte ich üben.
+Zwei Server ohne grafische Oberfläche sind Absicht. Server Core zwingt zum Arbeiten mit PowerShell, und genau das wollte ich üben. Zwei Windows-Versionen nebeneinander, weil in Firmen selten alles auf demselben Stand ist.
 
-Von jeder Maschine gibt es einen Snapshot im Ausgangszustand. Nach den Ausfalltests weiter unten war das mehr als einmal nützlich.
+Von jeder Maschine gibt es einen Snapshot im sauberen Ausgangszustand. Nach den Ausfalltests weiter unten war das mehrfach nützlich.
 
-## Themen
+## Kapitel
 
-1. [Lokale Benutzer und Absicherung des Administrator-Kontos](docs/01-benutzerverwaltung.md)
-   Eigener Administrator statt des eingebauten Kontos, GUI und Server Core im Vergleich, und warum man Konten deaktiviert statt sie zu löschen.
+**1. [Lokale Benutzer und Absicherung des Administrator-Kontos](docs/01-benutzerverwaltung.md)**
+Eigenen Administrator anlegen, eingebautes Konto deaktivieren. Warum die SID wichtiger ist als der Name und warum man Konten nie löscht. Derselbe Vorgang einmal grafisch und einmal auf Server Core.
 
-2. [Datenträger, Volumes und Software-RAID](docs/02-datentraeger-und-raid.md)
-   Basis- und dynamische Datenträger, übergreifende und gespiegelte Volumes, RAID 0 und RAID 5 mit Ausfalltest und Rebuild.
+**2. [Datenträgerverwaltung: von der virtuellen Platte zum Laufwerk](docs/02-datentraegerverwaltung.md)**
+Die zwei Ebenen im Hypervisor und im Gastsystem. MBR gegen GPT, Schnellformatierung, Verkleinern und Erweitern, und die PowerShell-Pipeline, die alles in vier Zeilen erledigt.
 
-3. [Speicherpools und Speicherplätze](docs/03-storage-spaces.md)
-   Storage Spaces mit zwölf Platten, Hot-Spare, die verschiedenen Absicherungsarten und ein Ausfalltest, bei dem ich Platten im laufenden Betrieb gezogen habe.
+**3. [Volume-Typen und Software-RAID](docs/03-raid.md)**
+Übergreifende, gestreifte, gespiegelte und RAID-5-Volumes. Jede Variante gebaut, danach eine Platte offline geschaltet und das Ergebnis festgehalten. Dazu ein Versuch zum Erweitern nach links und nach rechts, der mich überrascht hat. 22 Screenshots.
 
-4. [Windows Admin Center](docs/04-windows-admin-center.md)
-   Server ohne grafische Oberfläche über den Browser verwalten, WinRM und TrustedHosts.
+**4. [Speicherpools und Speicherplätze](docs/04-storage-spaces.md)**
+Zwölf Platten in einem Pool, Reserveplatten, vier Absicherungsarten nebeneinander und dünne Bereitstellung. Danach der Ausfalltest: Platten im laufenden Betrieb ziehen, bis der ganze Pool zusammenbricht, und wieder zurückstecken. 44 Screenshots.
 
-5. [NIC-Teaming, Failover und Netzwerkbrücke](docs/05-nic-teaming.md)
-   Ausfallsicherheit im Netzwerk, zwei Teams parallel betreiben, Strong Host gegen Weak Host und ein Routingfehler, der lange unbemerkt geblieben ist.
+**5. [Windows Admin Center](docs/05-windows-admin-center.md)**
+Server ohne Oberfläche über den Browser verwalten. WinRM, TrustedHosts und die Anmeldung in einer Arbeitsgruppe.
 
-6. [iSCSI](docs/06-iscsi-san.md)
-   Speicher auf Blockebene über das Netzwerk, Zielserver einrichten und die Platte von einem Core-Server und einem normalen Windows-Client aus einbinden.
+**6. [NIC-Teaming, Failover und Netzwerkbrücke](docs/06-nic-teaming.md)**
+Zehn Netzwerkkarten, zwei Teams mit unterschiedlichen Modellen und eine Brücke. Strong Host gegen Weak Host, ein Routingfehler, der lange unbemerkt blieb, und der Vergleich mit Cisco EtherChannel. 21 Screenshots.
+
+**7. [iSCSI](docs/07-iscsi.md)**
+Speicher auf Blockebene über das Netzwerk. Zielserver einrichten, die LUN auf dem Volume aus Kapitel 4 ablegen und von einem Core-Server und einem normalen Windows-Rechner einbinden. 12 Screenshots.
 
 ## In Arbeit
 
-Diese Themen stehen bei mir als Nächstes an und kommen dazu, sobald ich sie fertig habe:
+Diese Themen stehen als Nächstes an:
 
-- IIS als Webserver mit einer eigenen Website und einem anderen Port
+- IIS als Webserver mit eigener Website und abweichendem Port
 - DHCP-Rolle über das Windows Admin Center verteilen
-- Active Directory: Gesamtstruktur anlegen, Domänencontroller hochstufen und DNS integrieren
+- Active Directory: Gesamtstruktur anlegen, Domänencontroller hochstufen, DNS integrieren
 - Server der Domäne beitreten lassen, mit und ohne grafische Oberfläche
 
 ## Werkzeuge
 
-Proxmox VE als Hypervisor, Windows Server 2022 und 2025 in der Evaluierungsversion, Windows Admin Center, PowerShell und die üblichen Bordmittel wie `diskmgmt.msc`, `ncpa.cpl` und die Serververwaltung.
+Proxmox VE als Hypervisor, Windows Server 2022 und 2025 in der Evaluierungsversion, Windows Admin Center, PowerShell und die üblichen Bordmittel: `diskmgmt.msc`, `ncpa.cpl`, `lusrmgr.msc`, `iscsicpl.exe` und die Serververwaltung.
