@@ -97,12 +97,87 @@ Get-Disk | Where-Object PartitionStyle -eq 'RAW' |
 
 Die Kette liest sich wie der Ablauf selbst: alle rohen Platten suchen, als GPT initialisieren, eine Partition über die volle Grösse anlegen, formatieren. Der Filter auf `RAW` ist die Sicherung. Ohne ihn würde der Befehl auch Platten treffen, auf denen schon Daten liegen.
 
-Zum Nachsehen:
+## Test und Verifikation
+
+Nach jeder Änderung an Platten prüfe ich drei Ebenen, und zwar in dieser Reihenfolge. Alle Ausgaben stammen von `SRV25-GUI` (`172.16.10.21`).
+
+### Ebene 1: Sieht das Gastsystem die Platte?
 
 ```powershell
-Get-Disk   | Select-Object Number, FriendlyName, OperationalStatus, PartitionStyle, Size
-Get-Volume | Select-Object DriveLetter, FileSystemLabel, FileSystem, Size, SizeRemaining, HealthStatus
+Get-Disk | Select-Object Number, FriendlyName, OperationalStatus, PartitionStyle, `
+                         @{n='GB';e={[math]::Round($_.Size/1GB,1)}}
 ```
+
+```
+Number FriendlyName    OperationalStatus PartitionStyle   GB
+------ ------------    ----------------- --------------   --
+     0 QEMU HARDDISK   Online            GPT            60.0
+     1 QEMU HARDDISK   Online            GPT            10.0
+     2 QEMU HARDDISK   Offline           RAW            10.0
+```
+
+Zwei Zustände sind hier wichtig. `Offline` heisst, die Platte ist da, aber Windows fasst sie nicht an. `RAW` heisst, sie ist noch nicht initialisiert. Beides ist kein Fehler, sondern der normale Auslieferungszustand einer neuen Platte.
+
+Taucht eine gerade angehängte Platte gar nicht auf, hilft ein erneuter Scan des Speicherbusses:
+
+```powershell
+Update-HostStorageCache
+```
+
+### Ebene 2: Stimmt die Partitionierung?
+
+```powershell
+Get-Partition -DiskNumber 1 |
+    Select-Object PartitionNumber, DriveLetter, Type, `
+                  @{n='GB';e={[math]::Round($_.Size/1GB,1)}}
+```
+
+```
+PartitionNumber DriveLetter Type      GB
+--------------- ----------- ----      --
+              1             Reserved 0.0
+              2 F           Basic    10.0
+```
+
+Die erste Partition ohne Laufwerksbuchstaben ist normal: GPT legt einen kleinen reservierten Bereich für Verwaltungsdaten an.
+
+### Ebene 3: Ist das Dateisystem in Ordnung?
+
+```powershell
+Get-Volume -DriveLetter F |
+    Select-Object DriveLetter, FileSystemLabel, FileSystem, HealthStatus, `
+                  @{n='FreiGB';e={[math]::Round($_.SizeRemaining/1GB,1)}}
+```
+
+```
+DriveLetter FileSystemLabel FileSystem HealthStatus FreiGB
+----------- --------------- ---------- ------------ ------
+F           Data_10GB       NTFS       Healthy         9.9
+```
+
+`HealthStatus` ist die Spalte, auf die es ankommt. In den nächsten beiden Kapiteln steht dort nach einem simulierten Ausfall etwas anderes, und daran erkennt man den Unterschied zwischen "Laufwerk ist weg" und "Laufwerk läuft, aber ohne Redundanz".
+
+### Schreibtest
+
+Ein Volume, das sich anzeigen lässt, muss noch nicht beschreibbar sein:
+
+```powershell
+"Test" | Out-File F:\test.txt
+Get-Content F:\test.txt
+Remove-Item F:\test.txt
+```
+
+## Fehlersuche
+
+| Symptom | Ursache | Lösung |
+| :--- | :--- | :--- |
+| Platte fehlt in `Get-Disk` | im Hypervisor nicht angehängt oder Bus nicht neu gelesen | VM-Hardware prüfen, dann `Update-HostStorageCache` |
+| Platte ist `Offline` | Schutzverhalten bei fremden Platten | `Set-Disk -Number N -IsOffline $false` |
+| Platte ist `RAW` | noch nicht initialisiert | `Initialize-Disk -Number N -PartitionStyle GPT` |
+| Verkleinern bietet kaum Platz an | unbewegliche Dateien liegen mitten in der Partition | Auslagerungsdatei und Schattenkopien vorübergehend abschalten |
+| Erweitern ist ausgegraut | freier Bereich liegt nicht direkt rechts daneben | Reihenfolge prüfen, siehe [Kapitel 3](03-raid.md) |
+| Nur 2 TB nutzbar | Platte als MBR initialisiert | mit GPT neu initialisieren, Daten gehen verloren |
+| Image-Datei wächst immer weiter | `discard` im Hypervisor nicht gesetzt | Option nachtragen, danach `Optimize-Volume -ReTrim` |
 
 ## Begriffe, die in den nächsten Kapiteln wiederkommen
 
@@ -116,6 +191,27 @@ Get-Volume | Select-Object DriveLetter, FileSystemLabel, FileSystem, Size, SizeR
 | Volume verkleinern | Shrink Volume | Partition verkleinern, freien Platz erzeugen |
 | Volume erweitern | Extend Volume | freien Platz an eine Partition anhängen |
 | Schnellformatierung | Quick Format | formatieren ohne Oberflächenprüfung |
+
+## Dieselben Schritte auf Server Core
+
+Auf `SRV22-CORE` (`172.16.10.30`) gibt es keine Datenträgerverwaltung. Die Aufgabe bleibt dieselbe, man sieht nur nichts dabei. Deshalb arbeitet man dort in kleinen Schritten und prüft nach jedem:
+
+```powershell
+Get-Disk | Where-Object PartitionStyle -eq 'RAW'
+Initialize-Disk -Number 1 -PartitionStyle GPT
+New-Partition -DiskNumber 1 -AssignDriveLetter -UseMaximumSize
+Format-Volume -DriveLetter F -FileSystem NTFS -NewFileSystemLabel "Data" -Confirm:$false
+```
+
+Man kann das auch aus der Ferne machen, ohne sich anzumelden:
+
+```powershell
+Invoke-Command -ComputerName 172.16.10.30 -Credential SRV22-CORE\adm_local -ScriptBlock {
+    Get-Disk | Select-Object Number, OperationalStatus, PartitionStyle
+}
+```
+
+Genau dieser Weg wird im [Kapitel über iSCSI](07-iscsi.md) wieder gebraucht, wenn eine Platte über das Netzwerk ankommt und auf dem Core-Server eingerichtet werden muss.
 
 ## Was ich dabei gelernt habe
 

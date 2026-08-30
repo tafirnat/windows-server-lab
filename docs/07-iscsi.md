@@ -157,6 +157,127 @@ Der Schreibtest schliesst den Kreis. Ein neuer Ordner auf dem Client wird als SC
 
 ![Neuer Ordner auf der iSCSI-Platte](../images/iscsi-initiator-laptop-explorer-new-test-folder-13.png)
 
+## Test und Verifikation
+
+Bei iSCSI liegen Server und Client auseinander, also prüft man beide Seiten getrennt und dann die Verbindung dazwischen.
+
+### Serverseite: wird das Ziel angeboten?
+
+```powershell
+Get-Service -Name WinTarget | Select-Object Name, Status, StartType
+Get-IscsiServerTarget | Select-Object TargetName, InitiatorIds, LunMappings, Status
+```
+
+```
+Name      Status  StartType
+----      ------  ---------
+WinTarget Running Automatic
+
+TargetName : Ziel-01
+InitiatorIds : {IPAddress:172.16.10.30}
+LunMappings  : {TargetName:Ziel-01;VHD:"I:\iSCSIVirtualDisks\VDisk-iSCSI.vhdx";LUN:0}
+Status       : Connected
+```
+
+Drei Angaben zählen: der Dienst läuft, in `InitiatorIds` steht der zugelassene Client `172.16.10.30`, und in `LunMappings` ist die VHDX-Datei mit dem Ziel verbunden. Fehlt die Zuordnung, existiert das Ziel, gibt aber nichts heraus.
+
+```powershell
+Get-NetTCPConnection -LocalPort 3260 -State Listen |
+    Select-Object LocalAddress, LocalPort, State
+```
+
+```
+LocalAddress LocalPort State
+------------ --------- -----
+0.0.0.0           3260 Listen
+```
+
+### Die Verbindung dazwischen
+
+```powershell
+Test-NetConnection -ComputerName 172.16.10.21 -Port 3260
+```
+
+```
+ComputerName     : 172.16.10.21
+RemoteAddress    : 172.16.10.21
+RemotePort       : 3260
+TcpTestSucceeded : True
+```
+
+Diese eine Zeile trennt "iSCSI hat ein Problem" von "die Maschinen sehen sich nicht". Bei mir war es beim ersten Versuch das Zweite.
+
+### Clientseite: besteht die Sitzung?
+
+```powershell
+Get-IscsiSession |
+    Select-Object InitiatorNodeAddress, TargetNodeAddress, IsConnected, IsPersistent
+```
+
+```
+InitiatorNodeAddress : iqn.1991-05.com.microsoft:srv22-core
+TargetNodeAddress    : iqn.1991-05.com.microsoft:srv25-gui-ziel-01-target
+IsConnected          : True
+IsPersistent         : True
+```
+
+`IsPersistent` ist die Spalte, die man leicht übersieht. Steht dort `False`, funktioniert alles bis zum nächsten Neustart und danach ist die Platte weg.
+
+### Ist die Platte angekommen?
+
+```powershell
+Get-Disk | Where-Object BusType -eq "iSCSI" |
+    Select-Object Number, FriendlyName, BusType, OperationalStatus, `
+                  @{n='GB';e={[math]::Round($_.Size/1GB,1)}}
+```
+
+```
+Number FriendlyName    BusType OperationalStatus   GB
+------ ------------    ------- -----------------   --
+     1 MSFT Virtual HD iSCSI   Online            15.0
+```
+
+`BusType = iSCSI` ist der Beweis, dass die Platte über das Netz kommt und nicht lokal steckt. Im Explorer sieht man diesen Unterschied nicht.
+
+```powershell
+Get-Volume -DriveLetter F |
+    Select-Object DriveLetter, FileSystemLabel, FileSystem, HealthStatus, `
+                  @{n='FreiGB';e={[math]::Round($_.SizeRemaining/1GB,1)}}
+```
+
+```
+DriveLetter FileSystemLabel FileSystem HealthStatus FreiGB
+----------- --------------- ---------- ------------ ------
+F           iSCSI_Data      NTFS       Healthy        14.9
+```
+
+Dieselben Werte hat auch das Windows Admin Center im Screenshot weiter oben gezeigt, nur eben grafisch.
+
+### Schreibtest und Gegenprobe auf dem Server
+
+Der eigentliche Beweis ist, dass ein Schreibvorgang auf dem Client die Datei auf dem Server wachsen lässt:
+
+```powershell
+# auf dem Client
+New-Item -Path F:\Testordner -ItemType Directory
+"Testdaten" | Out-File F:\Testordner\test.txt
+
+# auf dem Server
+Get-Item "I:\iSCSIVirtualDisks\VDisk-iSCSI.vhdx" |
+    Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}
+```
+
+Weil die VHDX dynamisch angelegt ist, wächst die Datei mit den geschriebenen Daten. Damit ist die ganze Kette bestätigt: Explorer auf dem Client, SCSI-Befehle über TCP 3260, VHDX-Datei auf dem Volume mit doppelter Parität.
+
+### Neustartfestigkeit
+
+```powershell
+Restart-Computer -ComputerName 172.16.10.30 -Wait -For PowerShell
+Get-Disk | Where-Object BusType -eq "iSCSI"
+```
+
+Wenn die Platte danach ohne Zutun wieder da ist, stimmen beide Einstellungen: Dienst auf `Automatic` und Verbindung mit `-IsPersistent`.
+
 ## Ein Fehler, der nichts mit iSCSI zu tun hatte
 
 Der erste Verbindungsversuch von meinem Laptop aus lief in eine Zeitüberschreitung:
@@ -165,16 +286,38 @@ Der erste Verbindungsversuch von meinem Laptop aus lief in eine Zeitüberschreit
 
 Die Ursache lag nicht bei iSCSI, sondern eine Ebene tiefer: das Lab liegt in einem eigenen, isolierten Netz, und mein Laptop war in einem anderen Segment. Der Router lässt diesen Weg absichtlich nicht zu.
 
-Die Lehre daraus ist banal und trotzdem hilfreich: bevor man einen Dienst debuggt, prüft man, ob die Gegenstelle überhaupt erreichbar ist. Ein Ping hätte mir das in fünf Sekunden gesagt.
+Die Lehre daraus ist banal und trotzdem hilfreich: bevor man einen Dienst debuggt, prüft man, ob die Gegenstelle überhaupt erreichbar ist. Ein `Test-NetConnection` hätte mir das in fünf Sekunden gesagt.
 
-Die typischen Fehler in einer Übersicht:
+## Fehlersuche
 
 | Symptom | Ursache | Lösung |
 | :--- | :--- | :--- |
-| Zeitüberschreitung beim Verbinden | Client in einem anderen Segment, Router blockiert | aus demselben Netz testen |
-| Ziel wird nicht gefunden | Firewallregel für iSCSI aus | `Enable-NetFirewallRule -DisplayGroup "iSCSI-Dienst"` |
-| Anmeldung abgelehnt | Client nicht in der Zugriffsliste des Ziels | Initiator-ID am Ziel eintragen |
-| Platte nach Neustart weg | ohne `-IsPersistent` verbunden oder Dienst nicht automatisch | Dienst auf Automatisch, dauerhaft verbinden |
+| Zeitüberschreitung beim Verbinden | Client in einem anderen Segment, Router blockiert | `Test-NetConnection -Port 3260`, aus demselben Netz testen |
+| Portal lässt sich nicht hinzufügen | Firewallregel für iSCSI aus | auf dem Server `Enable-NetFirewallRule -DisplayGroup "iSCSI-Dienst"` |
+| Ziel erscheint, Anmeldung abgelehnt | Client nicht in der Zugriffsliste | Initiator-ID am Ziel eintragen, `Set-IscsiServerTarget -InitiatorIds` |
+| Ziel verbunden, aber keine Platte sichtbar | LUN nicht mit dem Ziel verknüpft | `Add-IscsiVirtualDiskTargetMapping` |
+| Platte nach Neustart weg | ohne `-IsPersistent` verbunden | erneut mit `-IsPersistent $true` verbinden |
+| Platte nach Neustart weg, trotz Persistent | Initiator-Dienst startet nicht automatisch | `Set-Service MSiSCSI -StartupType Automatic` |
+| Platte erscheint als `RAW` | normal, sie wurde noch nie formatiert | initialisieren und formatieren wie eine lokale Platte |
+| Dateisystem beschädigt | dieselbe LUN von zwei Rechnern gleichzeitig benutzt | nur ein Initiator pro LUN, sonst Cluster mit CSV |
+| VHDX wächst, obwohl Daten gelöscht wurden | dynamische VHDX schrumpft nicht von allein | `Optimize-VHD`, Dienst vorher trennen |
+
+## Begriffe
+
+| Deutsch | Englisch | Bedeutung |
+| :--- | :--- | :--- |
+| das Speichernetz | SAN | Speicher auf Blockebene über das Netz |
+| der Netzwerkspeicher | NAS | Speicher auf Dateiebene, etwa über SMB |
+| der Zielserver | iSCSI Target | Seite, die Speicher anbietet |
+| der Initiator | iSCSI Initiator | Seite, die den Speicher benutzt |
+| die logische Einheit (LUN) | Logical Unit Number | der herausgegebene Speicherbereich |
+| der qualifizierte Name (IQN) | iSCSI Qualified Name | eindeutiger Name von Ziel und Initiator |
+| das Portal | Target Portal | Adresse und Port, unter der ein Ziel erreichbar ist |
+| die dauerhafte Verbindung | Persistent Login | Verbindung wird nach dem Neustart neu aufgebaut |
+| die dynamische Erweiterung | Dynamically Expanding | VHDX wächst mit den Daten |
+| die CHAP-Anmeldung | CHAP Authentication | Anmeldung mit Benutzername und Kennwort |
+| das freigegebene Clustervolume | Cluster Shared Volume | erlaubt mehreren Servern gleichzeitigen Zugriff |
+| die Blockebene | Block Level | Zugriff auf rohe Blöcke statt auf Dateien |
 
 ## Alles per PowerShell
 

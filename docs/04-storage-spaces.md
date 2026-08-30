@@ -321,6 +321,125 @@ Get-StoragePool -IsPrimordial $false | Remove-StoragePool -Confirm:$false
 
 Die Reihenfolge ist Pflicht. Solange virtuelle Datenträger existieren, lässt sich der Pool nicht entfernen.
 
+## Test und Verifikation
+
+Storage Spaces hat drei Ebenen, und jede hat ihren eigenen Zustand. Bei einer Störung muss man wissen, welche davon meldet. Alle Ausgaben von `SRV25-GUI` (`172.16.10.21`).
+
+### Ebene 1: der Pool
+
+```powershell
+Get-StoragePool -IsPrimordial $false |
+    Select-Object FriendlyName, HealthStatus, OperationalStatus, `
+                  @{n='GrossGB';e={[math]::Round($_.Size/1GB,1)}}, `
+                  @{n='FreiGB';e={[math]::Round(($_.Size-$_.AllocatedSize)/1GB,1)}}
+```
+
+```
+FriendlyName HealthStatus OperationalStatus GrossGB FreiGB
+------------ ------------ ----------------- ------- ------
+Pool0        Healthy      OK                  122.0  119.4
+```
+
+Die Spalte `FreiGB` ist bei dünner Bereitstellung die wichtigste Kennzahl überhaupt. Angelegt waren Laufwerke über 83 GB, belegt sind davon nur wenige. Läuft dieser Wert gegen null, stehen **alle** Laufwerke gleichzeitig, obwohl der Explorer noch Platz anzeigt.
+
+### Ebene 2: die virtuellen Datenträger
+
+```powershell
+Get-VirtualDisk | Select-Object FriendlyName, ResiliencySettingName, `
+                                @{n='GB';e={[math]::Round($_.Size/1GB,0)}}, `
+                                HealthStatus, OperationalStatus
+```
+
+```
+FriendlyName  ResiliencySettingName GB HealthStatus OperationalStatus
+------------  --------------------- -- ------------ -----------------
+vDisk0        Mirror                20 Healthy      OK
+vDisk1        Mirror                30 Healthy      OK
+vDisk-1Parity Parity                15 Healthy      OK
+vDisk-2Parity Parity                18 Healthy      OK
+```
+
+Nach dem Entfernen der ersten Platte sah dieselbe Abfrage so aus:
+
+```
+FriendlyName  ResiliencySettingName GB HealthStatus OperationalStatus
+------------  --------------------- -- ------------ -----------------
+vDisk0        Mirror                20 Unhealthy    Detached
+vDisk1        Mirror                30 Warning      Degraded
+vDisk-1Parity Parity                15 Warning      Degraded
+vDisk-2Parity Parity                18 Warning      Degraded
+```
+
+Der Unterschied zwischen `Degraded` und `Detached` ist genau der Unterschied zwischen "läuft ohne Reserve weiter" und "im Explorer nicht mehr vorhanden". Drei Laufwerke lieferten weiter Daten aus, der Zwei-Wege-Spiegel nicht mehr.
+
+### Ebene 3: die physischen Platten
+
+```powershell
+Get-PhysicalDisk | Select-Object DeviceId, Usage, HealthStatus, OperationalStatus, `
+                                 @{n='GB';e={[math]::Round($_.Size/1GB,0)}}
+```
+
+Hier sieht man auch, welche Platten als Reserve dienen: sie tragen `Usage = HotSpare` statt `Auto-Select` und zählen nicht zur nutzbaren Kapazität.
+
+### Wo liegt ein Datenträger wirklich?
+
+```powershell
+Get-VirtualDisk -FriendlyName "vDisk0" | Get-PhysicalDisk |
+    Select-Object DeviceId, Usage, HealthStatus
+```
+
+Die Antwort waren **alle zehn** aktiven Platten, nicht zwei. Der Screenshot dazu steht weiter oben beim ersten Datenträger. Das ist der wichtigste Unterschied zum klassischen RAID 1: dort wäre ein Spiegel genau zwei Platten, hier verteilt er sich in kleinen Abschnitten über den gesamten Pool.
+
+### Der Ausfall aus Sicht des Dateisystems
+
+```powershell
+Get-Volume | Where-Object DriveLetter -in 'F','G','H','I' |
+    Select-Object DriveLetter, FileSystemLabel, HealthStatus, `
+                  @{n='FreiGB';e={[math]::Round($_.SizeRemaining/1GB,1)}}
+```
+
+Im degradierten Zustand fehlte `F` in dieser Liste, während `G`, `H` und `I` unverändert `Healthy` meldeten und ihre Dateien auslieferten. Nach dem Zurückstecken aller Platten waren alle vier wieder vollständig da.
+
+### Reparatur beobachten
+
+```powershell
+Get-StorageJob
+Repair-VirtualDisk -FriendlyName "vDisk0"
+```
+
+`Get-StorageJob` zeigt laufende Reparaturen mit Fortschritt in Prozent. Solange dort ein Auftrag läuft, ist die Redundanz noch nicht wiederhergestellt, auch wenn der Datenträger schon wieder erreichbar ist.
+
+## Fehlersuche
+
+| Symptom | Ursache | Lösung |
+| :--- | :--- | :--- |
+| Platte wird im Pool-Assistenten nicht angeboten | Reste einer alten Partitionierung, `CanPool = False` | `Clear-Disk -RemoveData -RemoveOEM`, danach `Reset-PhysicalDisk` |
+| Drei-Wege-Spiegelung nicht auswählbar | weniger als fünf Platten im Pool | Platten ergänzen oder Zwei-Wege-Spiegelung nehmen |
+| Doppelte Parität nicht auswählbar | weniger als sieben Platten im Pool | Platten ergänzen oder einfache Parität nehmen |
+| Datenträger `Detached` nach Plattenausfall | zu wenige Kopien für eine eindeutige Mehrheit | Platte zurückholen, Pool erkennt sie selbst |
+| Ganzer Pool offline | Mehrheit der Verwaltungsdaten verloren | Platten zurückholen, Pool hebt die Sperre selbst auf |
+| Laufwerk voll, obwohl der Explorer Platz zeigt | dünne Bereitstellung, Pool ist erschöpft | Platten ergänzen oder Datenträger verkleinern |
+| Reparatur startet nicht von allein | kein freier Platz und keine Reserve | `Repair-VirtualDisk` von Hand, Reserve einplanen |
+| Pool lässt sich nicht entfernen | virtuelle Datenträger existieren noch | erst `Remove-VirtualDisk`, dann `Remove-StoragePool` |
+
+## Begriffe
+
+| Deutsch | Englisch | Bedeutung |
+| :--- | :--- | :--- |
+| der Speicherpool | Storage Pool | Zusammenfassung physischer Platten zu einem Vorrat |
+| der Speicherplatz | Storage Space | virtueller Datenträger aus dem Pool |
+| der Ur-Pool | Primordial Pool | Liste der Platten, die in einen Pool könnten |
+| der Reserve-Datenträger | Hot Spare | Reserveplatte, springt bei Ausfall automatisch ein |
+| die Resilienz | Resiliency | Absicherungsart: einfach, Spiegel, Parität |
+| die Zwei-Wege-Spiegelung | Two-Way Mirror | zwei Kopien, verträgt eine Platte |
+| die Drei-Wege-Spiegelung | Three-Way Mirror | drei Kopien, verträgt zwei Platten |
+| die einfache Parität | Single Parity | eine Prüfsumme, verträgt eine Platte |
+| die doppelte Parität | Dual Parity | zwei Prüfsummen, verträgt zwei Platten |
+| die dünne Bereitstellung | Thin Provisioning | Platz wird erst beim Schreiben belegt |
+| die feste Bereitstellung | Fixed Provisioning | Platz wird sofort reserviert |
+| der Abschnitt | Slab | kleine Einheit, in der Daten über den Pool verteilt werden |
+| das Mehrheitsprinzip | Quorum | Regel, nach der der Pool über Gültigkeit entscheidet |
+
 ## Was ich dabei gelernt habe
 
 **Die Reihenfolge der Ausfälle war nicht die erwartete.** Ich hätte auf die doppelte Parität gesetzt, gewonnen hat der Drei-Wege-Spiegel. Ein Spiegel muss beim Lesen nur eine andere Kopie nehmen, Parität muss rechnen. Wenn Platten unsauber wegbrechen, ist die einfachere Lösung die robustere. Genau deshalb setzt Microsoft bei virtuellen Maschinen und Datenbanken auf Spiegelung und empfiehlt Parität eher für Archivdaten.

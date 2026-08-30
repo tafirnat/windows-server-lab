@@ -234,6 +234,124 @@ Aus dem Netzwerkunterricht kannte ich EtherChannel und LACP. Der Vergleich hat m
 
 Beides erreicht dasselbe Ziel auf verschiedenen Ebenen. Der switchunabhängige Modus ist flexibler und einfacher, LACP kann dafür den eingehenden Verkehr besser verteilen, weil beide Seiten Bescheid wissen.
 
+## Test und Verifikation
+
+Beim Netzwerk reicht "es geht" nicht, weil ein Teil funktionieren kann, während ein anderer stillschweigend nicht funktioniert. Genau das ist mir mit der `0.0.0.0`-Route passiert. Deshalb prüfe ich in vier Stufen. Ausgaben von `SRV25-GUI`.
+
+### Stufe 1: Stimmt der Aufbau der Teams?
+
+```powershell
+Get-NetLbfoTeam | Select-Object Name, Members, TeamingMode, LoadBalancingAlgorithm, Status
+```
+
+```
+Name      Members                     TeamingMode       LoadBalancingAlgorithm Status
+----      -------                     -----------       ---------------------- ------
+NIC-Team0 {LAN1, LAN2, LAN3, LAN4}    SwitchIndependent AddressHash            Up
+NIC-Team2 {Ether1, Ether2, Ether3,    SwitchIndependent AddressHash            Up
+           Ether4}
+```
+
+Die Rollenverteilung innerhalb eines Teams ist eine eigene Abfrage:
+
+```powershell
+Get-NetLbfoTeamMember -Team "NIC-Team0" |
+    Select-Object Name, AdministrativeMode, OperationalStatus
+```
+
+```
+Name AdministrativeMode OperationalStatus
+---- ------------------ -----------------
+LAN1 Standby            Standby
+LAN2 Active             Active
+LAN3 Active             Active
+LAN4 Active             Active
+```
+
+Hier sieht man den Unterschied zwischen den beiden Modellen als Zahl: drei aktive Karten bei Team 0, vier bei Team 2.
+
+### Stufe 2: Wer hat welche Adresse?
+
+```powershell
+Get-NetIPAddress -AddressFamily IPv4 |
+    Where-Object InterfaceAlias -match "Team|brücke" |
+    Select-Object InterfaceAlias, IPAddress, PrefixLength
+```
+
+```
+InterfaceAlias  IPAddress     PrefixLength
+--------------  ---------     ------------
+NIC-Team0       172.16.10.21            24
+NIC-Team2       172.16.10.45            24
+Netzwerkbrücke  172.16.10.46            24
+```
+
+Die zehn physischen Karten tauchen hier bewusst **nicht** auf. Sie haben keine eigene Adresse mehr, das ist der Multiplexor in einer Ausgabe.
+
+### Stufe 3: Ist das Routing sauber?
+
+Das ist die Prüfung, die ich beim ersten Mal übersprungen habe:
+
+```powershell
+Get-NetRoute -DestinationPrefix "0.0.0.0/0" |
+    Format-Table ifIndex, InterfaceAlias, NextHop, RouteMetric -AutoSize
+```
+
+Fehlerhafter Zustand nach dem Anlegen des Teams:
+
+```
+ifIndex InterfaceAlias NextHop      RouteMetric
+------- -------------- -------      -----------
+     22 NIC-Team0      172.16.10.1          256
+     14 LAN1           0.0.0.0              256
+```
+
+Richtiger Zustand nach der Bereinigung:
+
+```
+ifIndex InterfaceAlias NextHop      RouteMetric
+------- -------------- -------      -----------
+     22 NIC-Team0      172.16.10.1          256
+```
+
+Es darf genau eine Zeile geben. Eine zweite mit `0.0.0.0` als nächstem Ziel ist ein Rest der alten Konfiguration und sorgt dafür, dass Ziele ausserhalb des Subnetzes nicht mehr erreichbar sind.
+
+### Stufe 4: Erreichbarkeit von aussen, in der richtigen Reihenfolge
+
+Vom Client aus, jede Zeile prüft etwas anderes:
+
+```powershell
+Test-NetConnection -ComputerName 172.16.10.21   # Team 0, Hauptadresse
+Test-NetConnection -ComputerName 172.16.10.45   # Team 2
+Test-NetConnection -ComputerName 172.16.10.46   # Netzwerkbrücke
+Test-NetConnection -ComputerName 172.16.10.1    # Router, Ziel im selben Subnetz
+Test-NetConnection -ComputerName 1.1.1.1        # Ziel ausserhalb, prueft das Routing
+```
+
+Die letzte Zeile ist die entscheidende. Ein Ziel im eigenen Subnetz wird über ARP erreicht und braucht die Routingtabelle gar nicht. Erst ein Ziel ausserhalb beweist, dass die Standardroute stimmt. Genau deshalb sah bei mir lange alles gesund aus, obwohl es das nicht war.
+
+Vor dem Weak-Host-Umbau antwortete nur `172.16.10.21`, danach alle drei Adressen. Der Screenshot dazu steht weiter oben im Abschnitt über die beiden Teams.
+
+### Der Failover-Test selbst
+
+```powershell
+# Eine aktive Karte abschalten, waehrend ein Dauerping laeuft
+Disable-NetAdapter -Name "LAN2" -Confirm:$false
+Get-NetLbfoTeamMember -Team "NIC-Team0" |
+    Select-Object Name, AdministrativeMode, OperationalStatus
+```
+
+```
+Name AdministrativeMode OperationalStatus
+---- ------------------ -----------------
+LAN1 Standby            Active
+LAN2 Active             Failed
+LAN3 Active             Active
+LAN4 Active             Active
+```
+
+Die Reservekarte steht weiterhin auf `Standby` als eingestellter Modus, ihr Betriebszustand ist aber auf `Active` gewechselt. Der Dauerping lief ohne Unterbrechung weiter, die Adresse `172.16.10.21` blieb erreichbar. Das ist der ganze Zweck der Übung.
+
 ## Automatisierung
 
 ```powershell
@@ -249,6 +367,20 @@ New-NetIPAddress -InterfaceAlias "NIC-Team0" -IPAddress "172.16.10.21" `
 
 Get-NetLbfoTeam
 ```
+
+## Fehlersuche
+
+| Symptom | Ursache | Lösung |
+| :--- | :--- | :--- |
+| Team lässt sich nicht anlegen, Fehler beim Lastenausgleich | `Dynamisch` in einer VM nicht unterstützt | `AddressHash` verwenden |
+| Ping auf den Router geht, Internet nicht | zweite Standardroute mit `0.0.0.0` | `Get-NetRoute -DestinationPrefix "0.0.0.0/0"`, danach `netsh int ip set address` |
+| Zweites Team antwortet nicht auf Ping | Strong-Host-Modell | `Set-NetIPInterface -WeakHostSend Enabled -WeakHostReceive Enabled` |
+| Nach dem Umstellen weiterhin keine Antwort | alter Eintrag im ARP-Zwischenspeicher des Clients | auf dem Client `arp -d *` |
+| Netzwerkbrücke antwortet nicht | Firewallprofil steht auf Öffentlich | `Set-NetConnectionProfile -NetworkCategory Private` |
+| Mitgliedskarte hat noch eine eigene IP | Karte war vor dem Team konfiguriert | Adresse an der Karte entfernen, sie gehört dem Team |
+| Bandbreite niedriger als erwartet | eine Karte steht auf Standby | `Get-NetLbfoTeamMember` prüfen |
+| Verbindung bricht bei Kartenausfall ab | Team im falschen Modus oder Switch erwartet LACP | `SwitchIndependent` prüfen |
+| Broadcast-Sturm nach dem Überbrücken | beide Karten im selben VLAN, kein Spanning Tree | Brücke auflösen, nur getrennte Segmente überbrücken |
 
 ## Begriffe
 

@@ -151,15 +151,100 @@ Das ist der Aufbau aus dem [iSCSI-Kapitel](07-iscsi.md) von der anderen Seite ge
 
 Der eingebaute PowerShell-Bereich ist dabei fast der nützlichste. Man arbeitet grafisch, findet die richtige Stelle, und wenn man dann doch einen Befehl braucht, ist die Konsole einen Klick entfernt.
 
+## Test und Verifikation
+
+Bevor man im Browser sucht, prüft man die beiden Ebenen darunter: lauscht der Gateway, und antwortet die Gegenstelle?
+
+### Lauscht der Gateway?
+
+```powershell
+Get-Service -Name WindowsAdminCenter | Select-Object Name, Status, StartType
+Get-NetTCPConnection -LocalPort 6516 -State Listen |
+    Select-Object LocalAddress, LocalPort, State
+```
+
+```
+Name               Status  StartType
+----               ------  ---------
+WindowsAdminCenter Running Automatic
+
+LocalAddress LocalPort State
+------------ --------- -----
+::                6516 Listen
+```
+
+`::` bedeutet, dass auf allen Adressen gelauscht wird. Der Aufruf ist danach `https://172.16.10.21:6516`, bei Installation auf Port 443 entsprechend `https://172.16.10.21`.
+
+### Antwortet die Gegenstelle über WinRM?
+
+Das ist die Prüfung, die mir am häufigsten geholfen hat. Sie trennt "Windows Admin Center hat ein Problem" von "die Gegenstelle antwortet gar nicht":
+
+```powershell
+Test-NetConnection -ComputerName 172.16.10.30 -Port 5985
+```
+
+```
+ComputerName     : 172.16.10.30
+RemoteAddress    : 172.16.10.30
+RemotePort       : 5985
+TcpTestSucceeded : True
+```
+
+Danach die Anmeldung selbst, denn ein offener Port heisst noch nicht, dass das Konto akzeptiert wird:
+
+```powershell
+Test-WSMan -ComputerName 172.16.10.30 -Credential SRV22-CORE\adm_local -Authentication Negotiate
+Invoke-Command -ComputerName 172.16.10.30 -Credential SRV22-CORE\adm_local `
+               -ScriptBlock { hostname; (Get-Volume F).FileSystemLabel }
+```
+
+```
+SRV22-CORE
+iSCSI_Data
+```
+
+Wenn diese Zeilen durchlaufen, funktioniert auch das Windows Admin Center. Läuft `Test-NetConnection` durch, `Test-WSMan` aber nicht, liegt es an der Anmeldung oder an TrustedHosts.
+
+### Ist die Gegenstelle eingetragen?
+
+```powershell
+Get-Item WSMan:\localhost\Client\TrustedHosts
+```
+
+```
+   WSManConfig: Microsoft.WSMan.Management\WSMan::localhost\Client
+
+Type     Name          SourceOfValue  Value
+----     ----          -------------  -----
+System.  TrustedHosts                 172.16.10.*
+```
+
 ## Wenn es nicht geht
 
 | Symptom | Ursache | Lösung |
 | :--- | :--- | :--- |
-| Zugriff verweigert bei der Anmeldung | Konto ohne `.\` eingegeben oder nicht in der WAC-Gruppe | `.\adm_local` verwenden, Gruppenmitgliedschaft prüfen |
-| WinRM-Fehler beim Hinzufügen eines Core-Servers | WinRM lauscht nicht oder Gegenstelle nicht in TrustedHosts | auf dem Zielserver `winrm quickconfig`, dann TrustedHosts prüfen |
-| Zertifikatswarnung im Browser | selbst signiertes Zertifikat | im Lab über "Erweitert" fortfahren, produktiv ein richtiges Zertifikat hinterlegen |
+| Zugriff verweigert bei der Anmeldung | Konto ohne `.\` eingegeben | `.\adm_local` oder `SRV25-GUI\adm_local` |
+| Zugriff verweigert trotz richtiger Schreibweise | Konto nicht in der WAC-Gruppe | `Add-LocalGroupMember -Group "Windows Admin Center Administrators"` |
+| WinRM-Fehler beim Hinzufügen eines Core-Servers | WinRM lauscht nicht | auf der Gegenstelle `winrm quickconfig` |
+| WinRM-Fehler trotz laufendem Dienst | Arbeitsgruppe ohne TrustedHosts-Eintrag | `Set-Item WSMan:\localhost\Client\TrustedHosts -Value "172.16.10.*" -Concatenate` |
+| TrustedHosts-Eintrag verschwunden | ohne `-Concatenate` gesetzt, Liste überschrieben | Einträge neu setzen, immer mit `-Concatenate` |
+| Zertifikatswarnung im Browser | selbst signiertes Zertifikat | im Lab über "Erweitert" fortfahren, produktiv richtiges Zertifikat hinterlegen |
+| Seite gar nicht erreichbar | Dienst gestoppt oder falscher Port | `Get-Service WindowsAdminCenter`, Port mit `Get-NetTCPConnection` prüfen |
+| Server erscheint, Daten bleiben leer | Anmeldung am Ziel fehlgeschlagen | Verbindung mit **Anmeldeinformationen separat angeben** neu anlegen |
 
 Fast immer lag es bei mir an WinRM oder an der TrustedHosts-Liste, nicht am Windows Admin Center selbst.
+
+## Begriffe
+
+| Deutsch | Englisch | Bedeutung |
+| :--- | :--- | :--- |
+| das Gateway | Gateway | Server, auf dem Windows Admin Center läuft |
+| die Verwaltung ohne Agent | Agentless Management | auf den Zielsystemen wird nichts installiert |
+| WinRM | Windows Remote Management | Protokoll für die Fernverwaltung, TCP 5985 |
+| die vertrauenswürdigen Hosts | TrustedHosts | Liste der Gegenstellen ohne Domänenvertrauen |
+| die Arbeitsgruppe | Workgroup | Netzwerk ohne zentrale Anmeldung |
+| das selbst signierte Zertifikat | Self-signed Certificate | Zertifikat ohne offizielle Bestätigung |
+| die Verwaltungsstation | Management Station | zentraler Rechner für administrative Zugriffe |
 
 ## Was ich dabei gelernt habe
 

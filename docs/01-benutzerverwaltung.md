@@ -91,46 +91,123 @@ Ein Detail, über das ich gestolpert bin: die Gruppe heisst je nach Sprachversio
 Add-LocalGroupMember -SID "S-1-5-32-544" -Member "adm_local"
 ```
 
-## Kontrolle
+## Test und Verifikation
 
-Ohne Oberfläche sieht man das Ergebnis nicht, also muss man es abfragen:
+Ohne Oberfläche sieht man das Ergebnis nicht, also muss man es abfragen. Auf `SRV22-CORE` (`172.16.10.30`):
 
 ```powershell
-Get-LocalUser
-Get-LocalGroupMember -Group "Administrators"
-whoami
+Get-LocalUser | Select-Object Name, Enabled, PasswordNeverExpires
+```
+
+```
+Name           Enabled PasswordNeverExpires
+----           ------- --------------------
+adm_local         True                 True
+Administrator    False                False
+DefaultAccount   False                False
+Gast             False                False
+kurs_user         True                False
 ```
 
 ![Kontostatus auf dem Core-Server](../images/benutzer-core-user-verification-02.png)
 
-Wichtig ist die Spalte `Enabled`. `adm_local` steht auf `True`, `Administrator` auf `False`. Genau so soll es aussehen.
+Drei Zeilen sind entscheidend, und sie beweisen genau das, was der Abschnitt bezweckt:
 
-## Server Core trotzdem grafisch verwalten
+- `adm_local` ist `True`, mein Konto funktioniert
+- `Administrator` ist `False`, das eingebaute Konto ist stillgelegt
+- `kurs_user` ist `True`, der Testbenutzer ist da
 
-Server Core kann nicht weniger, es wird nur anders bedient. Wenn man doch eine Oberfläche möchte, kann man sich von einem Server mit Desktopdarstellung aus verbinden:
+Die Gruppenmitgliedschaft muss man getrennt prüfen, denn ein aktives Konto ohne Rechte nützt nichts:
 
-1. `compmgmt.msc` öffnen
-2. Rechtsklick auf **Computerverwaltung (Lokal)**
-3. **Verbindung mit anderem Computer herstellen**
-4. Namen oder IP des Core-Servers eintragen
+```powershell
+Get-LocalGroupMember -Group "Administratoren" |
+    Select-Object Name, ObjectClass, PrincipalSource
+```
 
-Danach verwaltet man dessen Benutzer im gewohnten Fenster. Die Verbindung läuft über WinRM und RPC.
+```
+Name                     ObjectClass PrincipalSource
+----                     ----------- ---------------
+SRV22-CORE\adm_local     Benutzer    Local
+SRV22-CORE\Administrator Benutzer    Local
+```
+
+Beide stehen in der Gruppe, aber nur eines der Konten ist aktiv. Deaktivieren entfernt die Mitgliedschaft nicht, es sperrt nur die Anmeldung. Genau das ist der Unterschied zum Löschen.
+
+Der eigentliche Test ist trotzdem die Anmeldung selbst. Erst danach habe ich das eingebaute Konto abgeschaltet:
+
+```powershell
+whoami
+whoami /groups | Select-String "Administratoren"
+```
+
+```
+srv22-core\adm_local
+Vordefiniert\Administratoren   Alias   S-1-5-32-544   Verpflichtende Gruppe, ...
+```
+
+Hier taucht auch die SID `S-1-5-32-544` auf, die feste Kennung der lokalen Administratorengruppe. Sie ist auf jedem Windows gleich, unabhängig von der Sprache.
+
+## Server Core aus der Ferne verwalten
+
+Server Core kann nicht weniger, es wird nur anders bedient. Wenn man doch eine Oberfläche möchte, verbindet man sich vom Server mit Desktopdarstellung aus.
 
 ```mermaid
 flowchart LR
-    GUI["Server mit Oberflaeche<br/>compmgmt.msc"]
-    CORE["Server Core<br/>keine Oberflaeche"]
-    GUI -->|"WinRM / RPC"| CORE
-    CORE -->|"Benutzerliste"| GUI
+    GUI["SRV25-GUI<br/>172.16.10.21<br/>compmgmt.msc"]
+    CORE["SRV22-CORE<br/>172.16.10.30<br/>keine Oberflaeche"]
+    GUI -->|"WinRM 5985 / RPC 135"| CORE
+    CORE -->|"Benutzer und Gruppen"| GUI
 ```
+
+Der Weg über die Oberfläche:
+
+1. auf `SRV25-GUI` die Konsole `compmgmt.msc` öffnen
+2. Rechtsklick auf **Computerverwaltung (Lokal)**
+3. **Verbindung mit anderem Computer herstellen**
+4. `172.16.10.30` oder `SRV22-CORE` eintragen
+
+Der Weg über PowerShell, der mir schnell lieber war:
+
+```powershell
+Set-Item WSMan:\localhost\Client\TrustedHosts -Value "172.16.10.*" -Concatenate -Force
+Enter-PSSession -ComputerName 172.16.10.30 -Credential SRV22-CORE\adm_local
+```
+
+Die Zeile mit `TrustedHosts` ist nötig, weil die Server noch in einer Arbeitsgruppe stehen und sich ohne Domäne nicht automatisch vertrauen. Dasselbe Thema kommt im [Kapitel über das Windows Admin Center](05-windows-admin-center.md) noch einmal vor.
 
 ## Wenn man sich ausgesperrt hat
 
-Für den Fall, dass das eigene Konto nicht funktioniert und das eingebaute schon deaktiviert ist, hilft nur noch der lokale Zugang über die Konsole des Hypervisors:
+Wenn das eigene Konto nicht funktioniert und das eingebaute schon deaktiviert ist, hilft kein Netzwerkweg mehr. Dann bleibt nur der lokale Zugang über die Konsole des Hypervisors:
 
 ```cmd
 net user Administrator /active:yes
 ```
+
+Genau deshalb ist die Reihenfolge weiter unten so wichtig.
+
+## Fehlersuche
+
+| Symptom | Ursache | Lösung |
+| :--- | :--- | :--- |
+| `Add-LocalGroupMember` findet die Gruppe nicht | Gruppe heisst je nach Sprache `Administrators` oder `Administratoren` | über die SID ansprechen: `-SID "S-1-5-32-544"` |
+| Anmeldung mit dem neuen Konto scheitert | Konto ist nicht in der Administratorengruppe | `Get-LocalGroupMember` prüfen |
+| Kein Zugang mehr auf den Server | eingebautes Konto deaktiviert, bevor das neue getestet wurde | über die Hypervisor-Konsole `net user Administrator /active:yes` |
+| Remoteverbindung wird abgewiesen | Arbeitsgruppe ohne TrustedHosts-Eintrag | `Set-Item WSMan:\localhost\Client\TrustedHosts` auf der Gegenseite eintragen |
+| Berechtigungen nach Neuanlage weg | Konto war gelöscht, neue SID | Konto wiederherstellen oder Rechte neu vergeben |
+| `New-LocalUser` lehnt das Kennwort ab | Kennwortrichtlinie nicht erfüllt | Länge und Komplexität prüfen, `secpol.msc` |
+
+## Begriffe
+
+| Deutsch | Englisch | Bedeutung |
+| :--- | :--- | :--- |
+| der Sicherheitsbezeichner (SID) | Security Identifier | eindeutige Kennung eines Kontos, trägt die Berechtigungen |
+| das integrierte Konto | Built-in Account | vom System angelegtes Konto wie `Administrator` |
+| das Konto deaktivieren | Disable Account | Anmeldung sperren, SID und Rechte bleiben |
+| die Gruppenmitgliedschaft | Group Membership | über Gruppen werden Rechte vergeben, nicht einzeln |
+| das Dienstkonto | Service Account | Konto, unter dem ein Dienst läuft |
+| die Kennwortrichtlinie | Password Policy | Vorgaben zu Länge, Komplexität, Gültigkeit |
+| das Prinzip der geringsten Rechte | Least Privilege | nur so viele Rechte wie nötig |
+| die Härtung | Hardening | Angriffsfläche eines Systems verkleinern
 
 ## Was ich dabei gelernt habe
 

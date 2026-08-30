@@ -198,6 +198,106 @@ Beim Wiedereinschalten übernimmt Windows die Platte nicht von allein. Sie ist w
 
 Danach läuft die Synchronisierung mit einer Prozentanzeige, und erst wenn sie durch ist, steht wieder **Fehlerfrei**.
 
+## Test und Verifikation
+
+Die Datenträgerverwaltung zeigt den Zustand farbig an, aber für eine Prüfung, die man auch auf einem Core-Server oder in einem Skript braucht, nimmt man PowerShell. Alle Ausgaben von `SRV25-GUI` (`172.16.10.21`).
+
+### Zustand der Platten
+
+```powershell
+Get-Disk | Select-Object Number, OperationalStatus, PartitionStyle, `
+                         @{n='GB';e={[math]::Round($_.Size/1GB,1)}}
+```
+
+Nach dem Abschalten einer Platte im laufenden Betrieb:
+
+```
+Number OperationalStatus PartitionStyle   GB
+------ ----------------- --------------   --
+     1 Online            GPT            10.0
+     2 Online            GPT            10.0
+     3 Offline           GPT            10.0
+```
+
+### Zustand der Volumes
+
+Das ist die eigentlich interessante Abfrage, weil sie den Unterschied zwischen den RAID-Stufen sichtbar macht:
+
+```powershell
+Get-Volume | Where-Object DriveLetter -in 'S','R','M','P' |
+    Select-Object DriveLetter, FileSystemLabel, HealthStatus, OperationalStatus
+```
+
+Im Normalzustand:
+
+```
+DriveLetter FileSystemLabel HealthStatus OperationalStatus
+----------- --------------- ------------ -----------------
+M           Mirror_RAID1    Healthy      OK
+P           RAID5_Data      Healthy      OK
+R           Striped_RAID0   Healthy      OK
+S           Spanned_Data    Healthy      OK
+```
+
+Nach dem Ausfall je einer beteiligten Platte:
+
+```
+DriveLetter FileSystemLabel HealthStatus OperationalStatus
+----------- --------------- ------------ -----------------
+M           Mirror_RAID1    Warning      Degraded
+P           RAID5_Data      Warning      Degraded
+```
+
+`R` und `S` fehlen in dieser Ausgabe vollständig. Das ist der ganze Unterschied in zwei Bildschirmzeilen: RAID 0 und das übergreifende Volume sind **weg**, Spiegel und RAID 5 laufen mit `Warning` weiter und liefern weiterhin Daten aus.
+
+### Der Beweis, dass die Daten noch da sind
+
+Ein `Warning` allein sagt wenig. Deshalb habe ich vor dem Ausfall Testdaten geschrieben und danach gelesen:
+
+```powershell
+Get-ChildItem P:\ | Select-Object Name, Length
+Get-Content P:\test.txt
+```
+
+Die Datei liess sich im degradierten Zustand ohne Fehler lesen. Windows rechnet die fehlenden Blöcke bei jedem Zugriff aus der Parität zurück.
+
+### Nach dem Rebuild
+
+```powershell
+Set-Disk -Number 3 -IsOffline $false
+Get-Volume -DriveLetter P | Select-Object HealthStatus, OperationalStatus
+```
+
+Direkt nach dem Einschalten steht dort weiterhin `Warning`, obwohl die Platte online ist. Erst nach **Volume reaktivieren** und der anschliessenden Synchronisierung wechselt es zurück auf `Healthy` / `OK`. Genau dieser Zwischenzustand ist der gefährliche.
+
+## Fehlersuche
+
+| Symptom | Ursache | Lösung |
+| :--- | :--- | :--- |
+| RAID-Optionen im Kontextmenü fehlen | Platte ist noch eine Basisplatte | mehrere Platten auswählen, Windows wandelt beim Anlegen um |
+| Volume nach Plattenausfall verschwunden | RAID 0 oder übergreifendes Volume, keine Redundanz | nur über Sicherung wiederherstellbar |
+| Volume zeigt "Fehlerhafte Redundanz" | eine Platte fehlt, Daten aber vorhanden | Platte zurückholen, dann Volume reaktivieren |
+| Platte wieder online, Volume bleibt fehlerhaft | Rebuild wird nicht automatisch gestartet | Rechtsklick, **Volume reaktivieren** |
+| Weniger Kapazität als erwartet | Regel der kleinsten Platte | gleich grosse Platten verwenden |
+| "Fehlend" in der Plattenliste | Platte war beim Start nicht da | zurückholen, sonst Volume dauerhaft degradiert |
+| Volume nach Erweitern in zwei Teilen | Platte wurde dynamisch, freier Platz lag links | siehe Abschnitt zum Erweitern weiter oben |
+| Umwandlung zu Basis nicht möglich | dynamische Platte enthält noch Volumes | alle Volumes löschen, danach umwandeln |
+
+## Begriffe
+
+| Deutsch | Englisch | Bedeutung |
+| :--- | :--- | :--- |
+| der Basisdatenträger | Basic Disk | normale Platte mit Partitionen |
+| der dynamische Datenträger | Dynamic Disk | Voraussetzung für Software-RAID unter Windows |
+| das einfache Volume | Simple Volume | eine Partition auf einer Platte |
+| das übergreifende Volume | Spanned Volume | mehrere Platten hintereinander, keine Sicherheit |
+| das Stripesetvolume | Striped Volume | RAID 0, Blöcke abwechselnd verteilt |
+| das gespiegelte Volume | Mirrored Volume | RAID 1, zwei identische Kopien |
+| die verteilte Parität | Distributed Parity | RAID 5, Prüfsumme reihum verteilt |
+| die fehlerhafte Redundanz | Degraded Redundancy | eine Platte fehlt, Daten noch erreichbar |
+| die Neusynchronisierung | Resynchronization | Wiederherstellung nach Plattenrückkehr |
+| der Verschnitt | Slack Space | ungenutzter Rest durch ungleiche Plattengrössen |
+
 ## Was ich dabei gelernt habe
 
 **Der Rebuild ist die kritische Phase, nicht der Ausfall.** Zwischen "Platte wieder online" und "Fehlerfrei" liegt die Synchronisierung, und in dieser Zeit gibt es weiterhin keine Redundanz. Bei RAID 5 wird dabei jede andere Platte vollständig gelesen, also genau die Belastung, bei der eine schwächelnde Platte ausfällt. Bei grossen Platten dauert das Stunden.
