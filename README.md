@@ -46,11 +46,13 @@ Zehn Netzwerkkarten, zwei Teams mit unterschiedlichen Modellen und eine Brücke.
 **7. [iSCSI](docs/07-iscsi.md)**
 Speicher auf Blockebene über das Netzwerk. Zielserver einrichten, die LUN auf dem Volume aus Kapitel 4 ablegen und von einem Core-Server und einem normalen Windows-Rechner einbinden. 12 Screenshots.
 
+**8. [Serverrollen, IIS und DNS](docs/08-iis-und-dns.md)**
+Der erste Dienst, den jemand von aussen benutzt. Rollen installieren, eine Website mit Bindung veröffentlichen, eine eigene DNS-Zone anlegen und die Seite am Ende über ihren Namen aufrufen. Dazu eine Reihenfolge für die Fehlersuche, wenn eine solche Kette nicht funktioniert. 22 Screenshots.
+
 ## In Arbeit
 
 Diese Themen stehen als Nächstes an:
 
-- IIS als Webserver mit eigener Website und abweichendem Port
 - DHCP-Rolle über das Windows Admin Center verteilen
 - Active Directory: Gesamtstruktur anlegen, Domänencontroller hochstufen, DNS integrieren
 - Server der Domäne beitreten lassen, mit und ohne grafische Oberfläche
