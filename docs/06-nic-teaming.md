@@ -109,7 +109,7 @@ Windows hat mich beim Eintragen sogar gewarnt, dass im selben Subnetz bereits ei
 
 ## Zwei Teams im selben Netz
 
-Das zweite Team lag im selben Subnetz wie das erste. Der Client konnte das erste Team anpingen, das zweite aber nicht, obwohl beide online waren und die Konfiguration richtig aussah.
+Das zweite Team bekam die Adresse `172.16.10.45`, also dasselbe Subnetz wie das erste mit `172.16.10.21`. Der Client konnte das erste Team anpingen, das zweite aber nicht, obwohl beide online waren und die Konfiguration richtig aussah.
 
 Der Grund ist das **Strong-Host-Modell**, das Windows standardmässig verwendet:
 
@@ -192,6 +192,8 @@ Es entsteht ein neuer Adapter namens Netzwerkbrücke:
 ![Status der Netzwerkbruecke](../images/nic-teaming-ncpa-netzwerkbruecke-status-20gbps-34.png)
 
 ![IPv4-Konfiguration der Netzwerkbruecke](../images/nic-teaming-ncpa-netzwerkbruecke-ipv4-config-35.png)
+
+Die Brücke bekam `172.16.10.46`, wieder ohne Standardgateway. Damit hat der Server jetzt drei Adressen im selben Subnetz: `.21` am ersten Team, `.45` am zweiten und `.46` an der Brücke.
 
 Auch hier trat das Strong-Host-Problem wieder auf, und die Lösung war dieselbe:
 
